@@ -1,0 +1,319 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Introduction
+
+Here we demonstrate the use of GLMs in modeling the frequency of auto insurance claims. We will use the French third-party auto insurance claims data set from the [CASdatasets package] (https://cas.uqam.ca/). GLMs are a natural choice for modeling claim frequency: they work well with distributions that insurance claims are often assumed to fit, they can handle complex trends, and they are easily interpretable and explainable.
+
+In the future, I hope to investigate and compare different models for frequency of claims, including machine learning methods such as random forests and neural networks. [Colella and Jones] (https://eforum.casact.org/article/73245-machine-learning-and-ratemaking-assessing-performance-of-four-popular-algorithms-for-modeling-auto-insurance-pure-premium) performed a similar comparison for modeling pure premium on the same dataset. I aim to expand their analysis by using the same algorithms to model frequency and severity separately, as is typical when using GLMs to predict pure premium for insurance claims in practice.
+
+
+```{r}
+library(CASdatasets)
+library(ggplot2)
+library(dplyr)
+library(ggbeeswarm)
+library(tidymodels)
+library(caret)
+```
+
+We begin by making a train/test split and taking an initial look at the data. The set we are looking at is freMTPL2freq, which has the following columns:
+
+* _IDpol:_ An ID number associated with each policy holder.
+* _ClaimNb:_ The number of claims filed under each policy. This is the target variable that we aim to model.
+* _Exposure:_ The amount of time a policy is active, measured in years. Since our aim is to model frequency, we will use this to weight the number of claims filed; one claim in six months should be considered the same frequency as two claims in one year.
+* _VehPower:_ A number representing the covered vehicle's power, with higher values indicating more power.
+* _VehAge:_ The vehicle's age in years.
+* _DrivAge:_ The insured driver's age in years.
+* _BonusMalus:_ In France, auto insurance policies have a "bonus-malus system" which raises or lowers premiums based on previous claims made on a policy. A bonus-malus of 100 is the default. A number less than 100 indicates that a driver has not had any claims for a long time, so they pay less, while a number greater than 100 indicates the opposite. For our purposes this is a numerical indicator of their driving record.
+* _VehBrand:_ A categorical indicator for the vehicle's manufacturer. 
+* _VehGas:_ Diesel or Regular per the vehicle.
+* _Area:_ A category related to population density where the insured driver lives.
+* _Density:_ Population density where the insured driver lives.
+* _Region:_ Policy region in France where the insured driver lives.
+
+```{r}
+set.seed(10)
+data("freMTPL2freq")
+PoliciesSplit <- initial_split(freMTPL2freq, prop=0.8)
+
+Policies <- training(PoliciesSplit)
+PoliciesTest <- testing(PoliciesSplit)
+#CLAIMS <- data(freMTPL2sev)
+```
+
+
+```{r}
+head(Policies,5)
+```
+
+# Exploratory data analysis
+
+We aim to investigate claim frequency, so first we examine the distribution of claim numbers for the policies in our data set. We should also normalize by dividing by the exposure column to examine the true claim frequency we get from each policy. A quick look for outliers reveals something interesting right away.
+
+```{r}
+Policies <- Policies %>% mutate(ClaimNormalized = ClaimNb/Exposure)
+
+Policies %>% arrange(desc(ClaimNormalized))
+Policies %>% arrange(desc(ClaimNb))
+```
+
+The highest frequencies seem to come from policies that are active for a very short amount of time. Time here is measured in years, so a policy with an exposure of .0027 is active for only around one day (this is very close to 1/365). This may strike one as unusual; such a policy could have been cancelled by the insurer, or perhaps it could be fraudulent. We will try to control for these outliers in our modeling. 
+
+<!-- Try to find a way to visualize what makes the outliers weird here. Specifically the ones with very low exposure and nonzero claims; surely there's something going on there? -->
+
+We also examine the other variables and how they relate to claim frequency. The outliers can make these plots hard to read, so it will be useful to graph them against the raw number of claims as well. Jitter plots can make the trends more visible, as many policies have the exact same number of claims (with most having zero). Observe the following example with plotting population density against claims:
+
+```{r}
+ggplot(head(Policies,10000),aes(x=Density,y=ClaimNormalized)) + geom_point(position = "jitter", size = 1, shape= "cross")
+ggplot(head(Policies,10000),aes(x=Density,y=ClaimNb)) + geom_point(position = "jitter", size = 1, shape= "cross")
+```
+
+
+
+Another advantage of swarm plots is that they can give us an idea of the distribution of both variables. We can see that there are a lot of policies that have population density 0, which may denote an unknown population density.
+
+```{r}
+#ggplot(head(Policies,10000),aes(x=DrivAge,y=ClaimNormalized)) + geom_point(position = "jitter", size = 1, shape= "cross")
+#ggplot(head(Policies,10000),aes(x=Density,y=ClaimNormalized)) + geom_point(position = "jitter", size = 1, shape= "cross")
+#ggplot(head(Policies,10000) %>% filter(ClaimNormalized < 25),aes(x=Density,y=ClaimNormalized)) + geom_point(position = "jitter", size = 1, shape= "cross")
+ggplot(head(Policies,10000),aes(x=VehAge,y=ClaimNb)) + geom_point(position = "jitter", size = 1, shape= "cross")
+ggplot(head(Policies,10000),aes(x=BonusMalus,y=ClaimNb)) + geom_point(position = "jitter", size = 1, shape= "cross")
+#ggplot(Policies%>% filter(ClaimNormalized > 0), aes(x=ClaimNormalized, y = '')) + geom_quasirandom()
+#ggplot(Policies%>% mutate(invExposure = 1/Exposure) %>% mutate(posClaim = ClaimNb>0), aes(x=invExposure, y='', color = posClaim)) + geom_quasirandom()
+```
+
+Many of our variables are categorical, or can at least be viewed that way. We can see if these variables have an effect on claim frequency by taking the average claim frequency over each value and plotting the averages, like so:
+
+```{r}
+Policies %>% 
+  group_by(DrivAge) %>% 
+  select(ClaimNormalized) %>% 
+  summarize(AvgClaims = mean(ClaimNormalized)) %>%
+  plot(aes(x=DrivAge, y=AvgClaims)) 
+```
+
+We can see a clear effect here where younger drivers are involved in far more accidents. We can try the same thing with vehicle age, but we will need to keep in mind that there are relatively much fewer vehicles over the age of 15 or 20.
+
+```{r}
+Policies %>% 
+  group_by(VehAge) %>% 
+  select(ClaimNormalized) %>% 
+  summarize(AvgClaims = mean(ClaimNormalized)) %>%
+  plot(aes(x=VehAge, y=AvgClaims))
+```
+For the vast majority of our data we can see an effect where younger cars are involved in fewer accidents. There is a lot of variance in the data for older vehicles, so we may want to group larger age ranges together in our model.
+
+We examine the rest of our variables in the same way:
+
+```{r}
+
+Policies %>% 
+  group_by(VehGas) %>% 
+  select(ClaimNormalized) %>% 
+  summarize(AvgClaims = mean(ClaimNormalized)) %>%
+  plot(aes(x=VehGas, y=AvgClaims)) 
+
+
+Policies %>% 
+  group_by(VehBrand) %>% 
+  select(ClaimNormalized) %>% 
+  summarize(AvgClaims = mean(ClaimNormalized)) %>%
+  plot(aes(x=VehBrand, y=AvgClaims)) 
+
+Policies %>% 
+  group_by(Region) %>% 
+  select(ClaimNormalized) %>% 
+  summarize(AvgClaims = mean(ClaimNormalized)) %>%
+  plot(aes(x=Region, y=AvgClaims))
+
+Policies %>% 
+  group_by(Area) %>% 
+  select(ClaimNormalized) %>% 
+  summarize(AvgClaims = mean(ClaimNormalized)) %>%
+  plot(aes(x=Area, y=AvgClaims))
+
+Policies %>% 
+  group_by(VehPower) %>% 
+  select(ClaimNormalized) %>% 
+  summarize(AvgClaims = mean(ClaimNormalized)) %>%
+  plot(aes(x=VehPower, y=AvgClaims))
+
+
+```
+
+Gas type has a clear effect on claim frequency, along with certain brands and regions. Frequency seems to decrease along with vehicle power except for a few numbers where it spikes. As this variable is ordered, it may be useful to use a jitter plot here:
+
+```{r}
+ggplot(head(Policies,20000),aes(x=VehPower,y=ClaimNb)) + geom_point(position = "jitter", size = .1, shape= "cross")
+```
+We can see that there are much less vehicles in the data set with higher power. We may benefit from some larger groupings here as well.
+
+For many of our numerical (continuous or integer) variables, we will want to group many values together and treat them as categorical variables. The standard behavior of a GLM is to model these with a single linear coefficient before the linking function is applied, so grouping (also called binning) can help model more complicated relationships. We demonstrate by binning driver age and visualizing those groups with claim frequency:
+
+
+```{r}
+
+Policies %>% 
+  mutate(AgeBracket = cut(Policies$DrivAge, c(17,21,27,45,75,Inf), include.lowest = TRUE, right=FALSE)) %>%
+  group_by(AgeBracket) %>%
+  summarize(AvgClaims = mean(ClaimNormalized)) %>%
+  plot(aes(x=AgeBracket, y=AvgClaims))
+```
+
+# Model selection
+
+We must consider which linking function to use in our GLM. It is typical to assume that claim frequency follows a Poisson distribution. To test that assumption, we check how close the variance and average value are to each other.
+
+
+```{r}
+#PoliciesGlm <- Policies
+#PoliciesGlm$AGEDRIVER <- cut(Policies$DrivAge,c(17,22,26,42,74,Inf))
+#PoliciesGlm$AGECAR <- cut(Policies$VehAge,c(0,1,4,15,Inf), include.lowest = TRUE)
+#PoliciesGlm$DENSITY <- cut(Policies$Density,c(0,40,200,500,4500,Inf),include.lowest = TRUE)
+
+vY <- Policies$ClaimNb
+vE <- Policies$Exposure
+m <- sum(vY)/sum(vE)
+v <- sum((vY-m*vE)^2)/sum(vE)
+cat("average =",m," variance =",v,"phi =",v/m,"\n")
+
+```
+
+They are very close, yet variance is slightly higher than mean. Using a poisson distribution is appropriate here.
+
+With our linking function chosen for now, we turn our attention to the variables our model will use as input. Many of our variables are categorical, which makes them easy to use in GLM modeling. For those which are numerical, it is often wise to bin them and treat them as categorical variables, especially when they vary in a complex way with respect to the target variable. We discuss specific choices for each numerical variable below:
+
+* _Driver age:_ This variable has a specific behavior where frequency is highly increased for young drivers, and relatively steady starting at around age 26. Above, we were able to demonstrate how to capture that behavior with binning, and we will use those same bins in our model.
+
+* _Vehicle age:_ We will bin cars in their first year separately from cars 1 to 3 years old to capture the effect we see in the graph above. After 4 years of age, the data becomes much more sparse, so we will make much larger bin to reduce potential variance in our model.
+
+* _Vehicle power:_ Aside from a couple of outliers for higher power vehicles, there seems to be a fairly steady trend of higher power vehicles having lower frequency. We will not bin this variable.
+
+* _Density:_ Policies with low density seem to have a higher claim frequency, so we will aim to group them together. Otherwise we will organize our bins so that they each capture a large amount of data - in particular as densities get higher, there seem to be less density values which have claims, so bins will need to be larger.
+
+* _Bonus-malus:_ Because claims are so rare, most drivers will have a bonus-malus of under 100. We will group all drivers with bonus-malus of over 100 together to account for scarcity of data, and have two seperate groups for under 100.
+
+```{r}
+PoliciesGLM <- Policies %>% 
+  filter(Exposure > 1/13, ClaimNb < 5) %>%
+  mutate(DrivAgeBracket = cut(DrivAge, c(17,21,27,45,75,Inf), include.lowest = TRUE, right=FALSE)) %>%
+  mutate(VehAgeBracket = cut(VehAge,c(0,1,4,15,Inf), include.lowest = TRUE)) %>%
+  mutate(DensityBracket = cut(Density,c(0,40,200,500,5000,Inf),include.lowest = TRUE)) %>%
+  mutate(BonusMalusBracket = cut(BonusMalus,c(50,75,100,Inf), include.lowest = TRUE))
+  
+  
+  
+  
+model1 = glm(ClaimNb~DrivAgeBracket+VehAgeBracket+DensityBracket+VehPower + VehBrand+VehGas + 
+            Area + Region + BonusMalusBracket, family = quasipoisson, data = PoliciesGLM, weights = Exposure)
+summary(model1)
+```
+
+The model summary given to us by R can provide a wealth of information. It gives us the value of the coefficient assigned to each variable under the Estimate column. For instance, the Driver age bracket for ages 21 through 26 has an estimate of -.42, indicating that drivers of age 21 through 26 are much less likely to have claims than the default (the first category, or drivers aged 18 through 20). It also gives statistical significance values, which indicate how likely it would be to see such an effect from that variable given the training data if that variable had no effect on the data. Very high significance factors indicate that the variable might not be useful for modeling; it may produce more noise than signal.
+
+In particular, the significance factors for the Area variable are quite high, and based off of the definitions for each variable, we may be able to get a more accurate account for what the Area variable is supposed to represent by including Density in our model anyway. 
+
+Below, we will test three different versions of our model: one which uses all of our variables, one which leaves out Area but uses the rest, and a very simple baseline model which only uses two variables which have an extremely significant effect on claims: driver age and gas type. We will compare these models using 5-fold cross validation on the metrics mean absolute error (MAE) and mean square error (MSE).
+
+
+```{r}
+PoliciesGLM['fold'] <- cut(seq(1:nrow(PoliciesGLM)),breaks=5,labels=FALSE)
+
+crossValMetrics = data.frame(
+  modelName = c("Poisson", "PoissonNoArea","PoissonBaseline")
+)
+foldNames <- c('fold1MAE','fold2MAE','fold3MAE','fold4MAE','fold5MAE','fold1MSE','fold2MSE','fold3MSE','fold4MSE','fold5MSE')
+for(i in foldNames){
+  crossValMetrics[i] <- 0
+}
+rownames(crossValMetrics) <- crossValMetrics$modelName
+```
+
+
+```{r}
+
+for(i in 1:5){
+  testData <- PoliciesGLM %>% filter(fold == i)
+  trainData <- PoliciesGLM %>% filter(fold != i)
+  
+  currentModel <- glm(ClaimNb~DrivAgeBracket+VehAgeBracket+DensityBracket+VehPower + VehBrand+VehGas + Area + Region + BonusMalusBracket, family = quasipoisson, data = trainData, weights = Exposure, y = FALSE)
+  preds<- predict(currentModel,testData,type='response',weights=Exposure)
+  MAE <- mean(abs(preds - testData$ClaimNb))
+  MSE <- mean((preds - testData$ClaimNb)**2)
+  crossValMetrics["Poisson",foldNames[i]] <- MAE
+  crossValMetrics["Poisson",foldNames[i+5]] <- MSE
+}
+
+for(i in 1:5){
+  testData <- PoliciesGLM %>% filter(fold == i)
+  trainData <- PoliciesGLM %>% filter(fold != i)
+  
+  currentModel <- glm(ClaimNb~DrivAgeBracket+VehAgeBracket+DensityBracket+VehPower + VehBrand+VehGas + Region + BonusMalusBracket, family = quasipoisson, data = trainData, weights = Exposure, y = FALSE)
+  preds<- predict(currentModel,testData,type='response',weights=Exposure)
+  MAE <- mean(abs(preds - testData$ClaimNb))
+  MSE <- mean((preds - testData$ClaimNb)**2)
+  crossValMetrics["PoissonNoArea",foldNames[i]] <- MAE
+  crossValMetrics["PoissonNoArea",foldNames[i+5]] <- MSE
+}
+
+for(i in 1:5){
+  testData <- PoliciesGLM %>% filter(fold == i)
+  trainData <- PoliciesGLM %>% filter(fold != i)
+  
+  currentModel <- glm(ClaimNb~DrivAgeBracket + VehGas , family = quasipoisson, data = trainData, weights = Exposure, y = FALSE)
+  preds<- predict(currentModel,testData,type='response',weights=Exposure)
+  MAE <- mean(abs(preds - testData$ClaimNb))
+  MSE <- mean((preds - testData$ClaimNb)**2)
+  crossValMetrics["PoissonBaseline",foldNames[i]] <- MAE
+  crossValMetrics["PoissonBaseline",foldNames[i+5]] <- MSE
+  
+}
+```
+
+
+```{r}
+crossValMetrics <- crossValMetrics %>% 
+  mutate(avgMAE = (fold1MAE+fold2MAE+fold3MAE+fold4MAE+fold5MAE)/5) %>%
+  mutate(avgMSE = (fold1MSE+fold2MSE+fold3MSE+fold4MSE+fold5MSE)/5)
+
+crossValMetrics %>% select(avgMAE, avgMSE)
+```
+
+The baseline model outperforms the more complicated ones in MAE, but falls short in MSE. Using squares means that MSE is more sensitive to outliers, and while we have tried to control for outliers that make little sense, a model's performance in extreme situations will be a big part of its usefulness in the insurance industry. We will select the second model to do our final evaluation on.
+
+# Model evaluation
+
+We will evaluate our final model by training it on all of the training data and computing MSE on two versoins of the test data: one with the filters on exposure and claim number applied, and one on the raw data. We will compare these results to the ones from earlier cross-evaluation.
+
+```{r}
+FinalModel = glm(ClaimNb~DrivAgeBracket+VehAgeBracket+DensityBracket+VehPower + VehBrand+VehGas + Region + BonusMalusBracket, family = quasipoisson, data = PoliciesGLM, weights = Exposure, y = FALSE)
+
+summary(FinalModel)
+  
+ 
+```
+
+
+```{r}
+PoliciesTest <- PoliciesTest %>%
+  mutate(DrivAgeBracket = cut(DrivAge, c(17,21,27,45,75,Inf), include.lowest = TRUE, right=FALSE)) %>%
+  mutate(VehAgeBracket = cut(VehAge,c(0,1,4,15,Inf), include.lowest = TRUE)) %>%
+  mutate(DensityBracket = cut(Density,c(0,40,200,500,5000,Inf),include.lowest = TRUE)) %>%
+  mutate(BonusMalusBracket = cut(BonusMalus,c(50,75,100,Inf), include.lowest = TRUE))
+
+PoliciesTestFiltered <-  PoliciesTest %>% 
+  filter(Exposure > 1/13, ClaimNb < 5) 
+
+predsFiltered <- predict(FinalModel,PoliciesTestFiltered,type='response',weights=Exposure)
+MSEFilt <- mean((predsFiltered - PoliciesTestFiltered$ClaimNb)**2)
+
+preds <- predict(FinalModel,PoliciesTest,type='response',weights=Exposure)
+MSE <- mean((preds - PoliciesTest$ClaimNb)**2)
+
+MSEFilt
+MSE
+```
+We see slightly worse performance on the filtered data than in the previous cross-evaluation step, as expected, but then significantly better performance on the unfiltered data.
