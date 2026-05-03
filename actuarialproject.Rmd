@@ -1,16 +1,20 @@
 ---
 title: "R Notebook"
-output: html_notebook
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
 ---
 
 # Introduction
 
-Here we demonstrate the use of GLMs in modeling the frequency of auto insurance claims. We will use the French third-party auto insurance claims data set from the [CASdatasets package] (https://cas.uqam.ca/). GLMs are a natural choice for modeling claim frequency: they work well with distributions that insurance claims are often assumed to fit, they can handle complex trends, and they are easily interpretable and explainable.
+Here we demonstrate the use of GLMs in modeling the frequency of auto insurance claims. We will use the French third-party auto insurance claims data set from the [CASdatasets package](https://cas.uqam.ca/). GLMs are a natural choice for modeling claim frequency: they work well with distributions that insurance claims are often assumed to fit, they can handle complex trends, and they are easily interpretable and explainable.
 
-In the future, I hope to investigate and compare different models for frequency of claims, including machine learning methods such as random forests and neural networks. [Colella and Jones] (https://eforum.casact.org/article/73245-machine-learning-and-ratemaking-assessing-performance-of-four-popular-algorithms-for-modeling-auto-insurance-pure-premium) performed a similar comparison for modeling pure premium on the same dataset. I aim to expand their analysis by using the same algorithms to model frequency and severity separately, as is typical when using GLMs to predict pure premium for insurance claims in practice.
+In the future, I hope to investigate and compare different models for frequency of claims, including machine learning methods such as random forests and neural networks. [Colella and Jones](https://eforum.casact.org/article/73245-machine-learning-and-ratemaking-assessing-performance-of-four-popular-algorithms-for-modeling-auto-insurance-pure-premium) performed a similar comparison for modeling pure premium on the same dataset. I aim to expand their analysis by using the same algorithms to model frequency and severity separately, as is typical when using GLMs to predict pure premium for insurance claims in practice.
 
 
-```{r}
+```{r, results='hide', message = FALSE, warning = FALSE}
 library(CASdatasets)
 library(ggplot2)
 library(dplyr)
@@ -41,7 +45,6 @@ PoliciesSplit <- initial_split(freMTPL2freq, prop=0.8)
 
 Policies <- training(PoliciesSplit)
 PoliciesTest <- testing(PoliciesSplit)
-#CLAIMS <- data(freMTPL2sev)
 ```
 
 
@@ -76,14 +79,18 @@ ggplot(head(Policies,10000),aes(x=Density,y=ClaimNb)) + geom_point(position = "j
 Another advantage of swarm plots is that they can give us an idea of the distribution of both variables. We can see that there are a lot of policies that have population density 0, which may denote an unknown population density.
 
 ```{r}
+ggplot(head(Policies,10000),aes(x=VehAge,y=ClaimNb)) + geom_point(position = "jitter", size = 1, shape= "cross")
+ggplot(head(Policies,10000),aes(x=BonusMalus,y=ClaimNb)) + geom_point(position = "jitter", size = 1, shape= "cross")
+```
+
+<!-- unused code just in case I need it later:
+
 #ggplot(head(Policies,10000),aes(x=DrivAge,y=ClaimNormalized)) + geom_point(position = "jitter", size = 1, shape= "cross")
 #ggplot(head(Policies,10000),aes(x=Density,y=ClaimNormalized)) + geom_point(position = "jitter", size = 1, shape= "cross")
 #ggplot(head(Policies,10000) %>% filter(ClaimNormalized < 25),aes(x=Density,y=ClaimNormalized)) + geom_point(position = "jitter", size = 1, shape= "cross")
-ggplot(head(Policies,10000),aes(x=VehAge,y=ClaimNb)) + geom_point(position = "jitter", size = 1, shape= "cross")
-ggplot(head(Policies,10000),aes(x=BonusMalus,y=ClaimNb)) + geom_point(position = "jitter", size = 1, shape= "cross")
 #ggplot(Policies%>% filter(ClaimNormalized > 0), aes(x=ClaimNormalized, y = '')) + geom_quasirandom()
 #ggplot(Policies%>% mutate(invExposure = 1/Exposure) %>% mutate(posClaim = ClaimNb>0), aes(x=invExposure, y='', color = posClaim)) + geom_quasirandom()
-```
+-->
 
 Many of our variables are categorical, or can at least be viewed that way. We can see if these variables have an effect on claim frequency by taking the average claim frequency over each value and plotting the averages, like so:
 
@@ -169,10 +176,6 @@ We must consider which linking function to use in our GLM. It is typical to assu
 
 
 ```{r}
-#PoliciesGlm <- Policies
-#PoliciesGlm$AGEDRIVER <- cut(Policies$DrivAge,c(17,22,26,42,74,Inf))
-#PoliciesGlm$AGECAR <- cut(Policies$VehAge,c(0,1,4,15,Inf), include.lowest = TRUE)
-#PoliciesGlm$DENSITY <- cut(Policies$Density,c(0,40,200,500,4500,Inf),include.lowest = TRUE)
 
 vY <- Policies$ClaimNb
 vE <- Policies$Exposure
@@ -212,7 +215,7 @@ model1 = glm(ClaimNb~DrivAgeBracket+VehAgeBracket+DensityBracket+VehPower + VehB
 summary(model1)
 ```
 
-The model summary given to us by R can provide a wealth of information. It gives us the value of the coefficient assigned to each variable under the Estimate column. For instance, the Driver age bracket for ages 21 through 26 has an estimate of -.42, indicating that drivers of age 21 through 26 are much less likely to have claims than the default (the first category, or drivers aged 18 through 20). It also gives statistical significance values, which indicate how likely it would be to see such an effect from that variable given the training data if that variable had no effect on the data. Very high significance factors indicate that the variable might not be useful for modeling; it may produce more noise than signal.
+The model summary given to us by R can provide a wealth of information. It gives us the value of the coefficient assigned to each variable under the Estimate column. For instance, the Driver age bracket for ages 21 through 26 has an estimate of -.42, indicating that drivers of age 21 through 26 are much less likely to have claims than the default (the first category, or drivers aged 18 through 20). It also gives statistical significance values, which indicate how likely it would be to see such an effect from that variable given the training data if that variable had no effect on the data. Very high significance factors indicate that the variable might not be useful for modeling; trying to fit it may produce more noise than signal.
 
 In particular, the significance factors for the Area variable are quite high, and based off of the definitions for each variable, we may be able to get a more accurate account for what the Area variable is supposed to represent by including Density in our model anyway. 
 
@@ -286,7 +289,7 @@ The baseline model outperforms the more complicated ones in MAE, but falls short
 
 # Model evaluation
 
-We will evaluate our final model by training it on all of the training data and computing MSE on two versoins of the test data: one with the filters on exposure and claim number applied, and one on the raw data. We will compare these results to the ones from earlier cross-evaluation.
+We will evaluate our final model by training it on all of the training data and computing MSE on two versions of the test data: one with the filters on exposure and claim number applied, and one on the raw data. We will compare these results to the ones from earlier cross-evaluation.
 
 ```{r}
 FinalModel = glm(ClaimNb~DrivAgeBracket+VehAgeBracket+DensityBracket+VehPower + VehBrand+VehGas + Region + BonusMalusBracket, family = quasipoisson, data = PoliciesGLM, weights = Exposure, y = FALSE)
