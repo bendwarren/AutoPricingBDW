@@ -21,9 +21,10 @@ library(dplyr)
 library(ggbeeswarm)
 library(tidymodels)
 library(caret)
+library(rlist)
 ```
 
-We begin by making a train/test split and taking an initial look at the data. The set we are looking at is freMTPL2freq, which has the following columns:
+We begin by taking an initial look at the data. We will not begin with a train/test split, as we will be using cross-evaluation to measure goodness of lift later. The set we are looking at is freMTPL2freq, which has the following columns:
 
 * _IDpol:_ An ID number associated with each policy holder.
 * _ClaimNb:_ The number of claims filed under each policy. This is the target variable that we aim to model.
@@ -41,11 +42,18 @@ We begin by making a train/test split and taking an initial look at the data. Th
 ```{r}
 set.seed(10)
 data("freMTPL2freq")
+
+Policies <- freMTPL2freq
+```
+
+
+<!-- With train/test split:
+
 PoliciesSplit <- initial_split(freMTPL2freq, prop=0.8)
 
 Policies <- training(PoliciesSplit)
 PoliciesTest <- testing(PoliciesSplit)
-```
+-->
 
 
 ```{r}
@@ -170,7 +178,7 @@ Policies %>%
   plot(aes(x=AgeBracket, y=AvgClaims))
 ```
 
-# Model selection
+# Model selection & evaluation
 
 We must consider which linking function to use in our GLM. It is typical to assume that claim frequency follows a Poisson distribution. To test that assumption, we check how close the variance and average value are to each other.
 
@@ -226,17 +234,22 @@ Below, we will test three different versions of our model: one which uses all of
 PoliciesGLM['fold'] <- cut(seq(1:nrow(PoliciesGLM)),breaks=5,labels=FALSE)
 
 crossValMetrics = data.frame(
-  modelName = c("Poisson", "PoissonNoArea","PoissonBaseline")
+  modelName = c("Poisson", "PoissonNoArea","PoissonBaseline", "SimpleBaseline", "MeanBaseline")
 )
 foldNames <- c('fold1MAE','fold2MAE','fold3MAE','fold4MAE','fold5MAE','fold1MSE','fold2MSE','fold3MSE','fold4MSE','fold5MSE')
 for(i in foldNames){
   crossValMetrics[i] <- 0
 }
 rownames(crossValMetrics) <- crossValMetrics$modelName
+
+  
+models = list() # this will be a list of lists containing each model trained during cross-evaluation, organized by the type of model and the fold of data it was trained on. Indexed by models[[typenumber]][[fold]]
 ```
 
 
 ```{r}
+
+poissonModels = list()
 
 for(i in 1:5){
   testData <- PoliciesGLM %>% filter(fold == i)
@@ -248,7 +261,12 @@ for(i in 1:5){
   MSE <- mean((preds - testData$ClaimNb)**2)
   crossValMetrics["Poisson",foldNames[i]] <- MAE
   crossValMetrics["Poisson",foldNames[i+5]] <- MSE
+  
+  prepend(poissonModels,currentModel)
 }
+append(models,poissonModels)
+
+poissonNAModels = list()
 
 for(i in 1:5){
   testData <- PoliciesGLM %>% filter(fold == i)
@@ -260,7 +278,12 @@ for(i in 1:5){
   MSE <- mean((preds - testData$ClaimNb)**2)
   crossValMetrics["PoissonNoArea",foldNames[i]] <- MAE
   crossValMetrics["PoissonNoArea",foldNames[i+5]] <- MSE
+  
+  prepend(poissonNAModels,currentModel)
 }
+append(models,poissonNAModels)
+
+poissonBModels = list()
 
 for(i in 1:5){
   testData <- PoliciesGLM %>% filter(fold == i)
@@ -273,8 +296,44 @@ for(i in 1:5){
   crossValMetrics["PoissonBaseline",foldNames[i]] <- MAE
   crossValMetrics["PoissonBaseline",foldNames[i+5]] <- MSE
   
+  prepend(poissonBModels,currentModel)
+}
+append(models,poissonBModels)
+
+
+```
+
+
+
+```{r}
+for(i in 1:5){
+  testData <- PoliciesGLM %>% filter(fold == i)
+  trainData <- PoliciesGLM %>% filter(fold != i)
+  
+  #Current model is just predicting zero for every policy
+  preds<- rep(0,length(testData$ClaimNb))
+  MAE <- mean(abs(preds - testData$ClaimNb))
+  MSE <- mean((preds - testData$ClaimNb)**2)
+  crossValMetrics["SimpleBaseline",foldNames[i]] <- MAE
+  crossValMetrics["SimpleBaseline",foldNames[i+5]] <- MSE
+  
+}
+
+for(i in 1:5){
+  testData <- PoliciesGLM %>% filter(fold == i)
+  trainData <- PoliciesGLM %>% filter(fold != i)
+  
+  #Current model is just predicting the mean for every policy
+  preds<- rep(mean(trainData$ClaimNb),length(testData$ClaimNb))
+  MAE <- mean(abs(preds - testData$ClaimNb))
+  MSE <- mean((preds - testData$ClaimNb)**2)
+  crossValMetrics["MeanBaseline",foldNames[i]] <- MAE
+  crossValMetrics["MeanBaseline",foldNames[i+5]] <- MSE
+  
 }
 ```
+
+
 
 
 ```{r}
@@ -285,8 +344,9 @@ crossValMetrics <- crossValMetrics %>%
 crossValMetrics %>% select(avgMAE, avgMSE)
 ```
 
-The baseline model outperforms the more complicated ones in MAE, but falls short in MSE. Using squares means that MSE is more sensitive to outliers, and while we have tried to control for outliers that make little sense, a model's performance in extreme situations will be a big part of its usefulness in the insurance industry. We will select the second model to do our final evaluation on.
+The baseline GLM outperforms the more complicated ones in MAE, but falls short in MSE. The simple baseline model does incredibly well with MAE, which suggests that MAE is not particularly useful for our purposes. Using squares means that MSE is more sensitive to outliers, and while we have tried to control for outliers that make little sense, a model's performance in extreme situations will be a big part of its usefulness in the insurance industry. 
 
+<!--
 # Model evaluation
 
 We will evaluate our final model by training it on all of the training data and computing MSE on two versions of the test data: one with the filters on exposure and claim number applied, and one on the raw data. We will compare these results to the ones from earlier cross-evaluation.
@@ -320,3 +380,4 @@ MSEFilt
 MSE
 ```
 We see slightly worse performance on the filtered data than in the previous cross-evaluation step, as expected, but then significantly better performance on the unfiltered data.
+-->
